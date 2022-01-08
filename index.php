@@ -3,7 +3,8 @@
 /**
  * Class Task
  */
-class Task {
+class Task
+{
 
     protected $taskId;
 
@@ -17,7 +18,8 @@ class Task {
      */
     protected $beforeFirstYield = true;
 
-    public function __construct($taskId, Generator $coroutine) {
+    public function __construct($taskId, Generator $coroutine)
+    {
         $this->taskId = $taskId;
         $this->coroutine = $coroutine;
     }
@@ -38,14 +40,15 @@ class Task {
         $this->sendValue = $sendValue;
     }
 
-    public function run() {
+    public function run()
+    {
         if ($this->beforeFirstYield) {
             $this->beforeFirstYield = false;
             return $this->coroutine->current();
         } else {
-            $receiveVal = $this->coroutine->send($this->sendValue);
+            $returnValue = $this->coroutine->send($this->sendValue);
             $this->sendValue = null;
-            return $receiveVal;
+            return $returnValue;
         }
     }
 
@@ -59,7 +62,8 @@ class Task {
 /**
  * Class Scheduler
  */
-class Scheduler {
+class Scheduler
+{
     protected $maxTaskId = 0;
     protected $taskMap = [];
     protected $taskQueue;
@@ -83,12 +87,34 @@ class Scheduler {
         return $taskId;
     }
 
+    public function killTask($taskId)
+    {
+        if (!isset($this->taskMap[$taskId])) {
+            return false;
+        }
+
+        unset($this->taskMap[$taskId]);
+        foreach ($this->taskQueue as $i => $task) {
+            if ($task->getTaskId() === $taskId) {
+                unset($this->taskQueue[$i]);
+                break;
+            }
+        }
+        return true;
+    }
+
     public function run()
     {
         while (!$this->taskQueue->isEmpty()) {
             /** @var Task $task */
             $task = $this->taskQueue->dequeue();
-            $task->run();
+            /** @var SystemCall $returnValue */
+            $returnValue = $task->run();
+
+            if ($returnValue instanceof SystemCall) {
+                $returnValue($task, $this); // Pass task, scheduler to SystemCall
+                continue;
+            }
 
             if ($task->isFinished()) {
                 unset($this->taskMap[$task->getTaskId()]);
@@ -99,24 +125,95 @@ class Scheduler {
     }
 }
 
-function task1() {
-    for ($i = 1; $i <= 1000; ++$i) {
-        echo "This is task 1 iteration $i.\n";
+/**
+ * Class SystemCall
+ */
+class SystemCall
+{
+    protected $callback;
+
+    public function __construct(callable $callback)
+    {
+        $this->callback = $callback;
+    }
+
+    /**
+     * It will run, when a object to call as a function
+     * @param Task $task
+     * @param Scheduler $scheduler
+     */
+    public function __invoke(Task $task, Scheduler $scheduler)
+    {
+        $callback = $this->callback;
+        $callback($task, $scheduler);
+    }
+}
+
+function getTaskId()
+{
+    return new SystemCall(function (Task $task, Scheduler $scheduler) {
+        $task->setSendValue($task->getTaskId());
+        $scheduler->schedule($task);
+    });
+}
+
+function newTask(Generator $coroutine)
+{
+    return new SystemCall(
+        function (Task $task, Scheduler $scheduler) use ($coroutine) {
+            $task->setSendValue($scheduler->newTask($coroutine));
+            $scheduler->schedule($task);
+        }
+    );
+}
+
+function killTask($tid)
+{
+    return new SystemCall(
+        function (Task $task, Scheduler $scheduler) use ($tid) {
+            $task->setSendValue($scheduler->killTask($tid));
+            $scheduler->schedule($task);
+        }
+    );
+}
+
+function task1($max)
+{
+    $tid = yield getTaskId(); // <-- here's the syscall!
+    for ($i = 1; $i <= $max; ++$i) {
+        echo "This is task $tid iteration $i.\n";
         yield;
     }
 }
 
-function task2() {
-    for ($i = 1; $i <= 1000000; ++$i) {
-        echo "This is task 2 iteration $i.\n";
+function task2($max)
+{
+    $tid = yield getTaskId(); // <-- here's the syscall!
+    for ($i = 1; $i <= $max; ++$i) {
+        echo "This is task $tid iteration $i.\n";
         yield;
     }
 }
 
-function task3() {
-    for ($i = 1; $i <= 1000000; ++$i) {
-        echo "This is task 3 iteration $i.\n";
+function childTask()
+{
+    $tid = (yield getTaskId());
+    while (true) {
+        echo "Child task $tid still alive!\n";
         yield;
+    }
+}
+
+function task3()
+{
+    $tid = (yield getTaskId());
+    $childTid = (yield newTask(childTask()));
+
+    for ($i = 1; $i <= 6; ++$i) {
+        echo "Parent task $tid iteration $i.\n";
+        yield;
+
+        if ($i == 3) yield killTask($childTid);
     }
 }
 
@@ -125,13 +222,13 @@ echo "Running... \n";
 
 $scheduler = new Scheduler;
 
-$scheduler->newTask(task1());
-$scheduler->newTask(task2());
+$scheduler->newTask(task1(4));
+$scheduler->newTask(task2(4));
 $scheduler->newTask(task3());
 $scheduler->run();
 
 $time_end = microtime(true);
 $execution_time = ($time_end - $time_start);
 
-echo "Total Execution Time:\n ".$execution_time . "\n";
+echo "Total Execution Time:\n " . $execution_time . "\n";
 
